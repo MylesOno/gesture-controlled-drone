@@ -1,17 +1,33 @@
 #include <CurieIMU.h>
 #include <MadgwickAHRS.h>
-
+#include <SoftwareSerial.h>
 Madgwick filter;
 unsigned long microsPerReading, microsPrevious;
 float accelScale, gyroScale;
-boolean calibration_done = true;
+boolean calibration_done = false;
 float y_shake = 0, z_shake = 0;
-boolean current_pitch[3], current_roll[3];
 float min_roll = 0, max_roll  = 0, min_pitch = 0, max_pitch = 0;
+float regZeroMaxP = 10.0;
+float reg1MaxP = 25.0;
+float reg2MaxP = 40.0;
+float regZeroMaxR = 10.0;
+float reg1MaxR = 25.0;
+float reg2MaxR = 40.0;
+int outputStream[] = {0,0,0};
+SoftwareSerial mySerial(0, 1); // RX, TX
+
+
+
 
 void setup() {
   Serial.begin(9600);
-
+  // set the data rate for the SoftwareSerial port
+  pinMode(1, OUTPUT);
+  while (!Serial) {
+    ; // wait for serial port to connect. Needed for native USB port only
+  }
+  mySerial.begin(9600);
+  mySerial.write("BYE");
   // start the IMU and filter
   CurieIMU.begin();
   CurieIMU.setGyroRate(25);
@@ -41,16 +57,18 @@ void loop() {
   float gx, gy, gz;
   float roll, pitch, heading;
   unsigned long microsNow;
+  
+  
 
   if(!calibration_done){
     microsNow = micros();
     if((microsNow - microsPrevious) <= 5000000){
-      Serial.print("Calibration, please hold steady "); 
+      //Serial.print("Calibration, please hold steady "); 
       calibrate();
     }
     else{
       calibration_done = true;
-      Serial.print("==================done with calibration. ");
+      //Serial.print("==================done with calibration. ");
       microsPrevious = micros();
     }
   }
@@ -80,7 +98,46 @@ void loop() {
       roll = filter.getRoll();
       pitch = filter.getPitch();
       heading = filter.getYaw();
+
+      printRegion(roll,pitch);
+//      mySerial.write("BYE");
+//      Serial.write("mySerial available");
       
+      
+       
+//      Serial.println("WRITING");
+      
+//      mySerial.write(outputStream[2]);
+//      mySerial.write(outputStream[1]);
+
+//============ convert int to binary array
+const byte numPins = 3;
+
+byte pins1[] = {7,8,9};
+byte pins2[] = {10,11,12};
+byte num1 = outputStream[1]+3;
+byte num2 = outputStream[2]+3;
+  for (byte i=0; i<numPins; i++) {
+    byte state = bitRead(num1, i);
+    digitalWrite(pins1[i], state);
+    Serial.print(state);
+    
+  }
+  Serial.println();
+  for (byte i=0; i<numPins; i++) {
+    byte state = bitRead(num2, i);
+    digitalWrite(pins2[i], state);
+    Serial.print(state);
+    
+  }
+  Serial.println();
+  Serial.println(num1);
+  Serial.println(num2);
+
+//================
+
+      
+    
       Serial.print("Orientation: ");
       Serial.print(heading);
       Serial.print(" ");
@@ -93,6 +150,100 @@ void loop() {
     }
   }
   
+}
+
+void printRegion(float roll, float pitch){
+  
+  
+  
+  //pitch region 0 
+  if(pitch < regZeroMaxP && pitch > -1.0*regZeroMaxP){
+    //Serial.println("Pitch 0");
+    outputStream[2] = 0;
+  }else if(pitch > regZeroMaxP && pitch < reg1MaxP){
+    //Serial.println("Pitch 1");
+    outputStream[2] = 1;
+    regZeroMaxP = 7.0;
+    reg1MaxP = 28;
+    reg2MaxP = 40;
+  }else if(pitch > reg1MaxP && pitch < reg2MaxP){
+    //Serial.println("Pitch 2");
+    outputStream[2] = 2;
+    regZeroMaxP = 10;
+    reg1MaxP = 22;
+    reg2MaxP = 43;
+  }else if(pitch > reg2MaxP){
+//    Serial.println("Pitch 3");
+    outputStream[2] = 3;
+    regZeroMaxP = 10;
+    reg1MaxP = 25;
+    reg2MaxP = 37;
+  }else if(pitch < -1.0*regZeroMaxP && pitch > -1.0*reg1MaxP){
+//    Serial.println("Pitch -1");
+    outputStream[2] = -1;
+    regZeroMaxP = 7;
+    reg1MaxP = 28;
+    reg2MaxP = 40;
+  }else if(pitch < -1.0*reg1MaxP && pitch > -1.0*reg2MaxP){
+//    Serial.println("Pitch -2");
+    outputStream[2] = -2;
+    regZeroMaxP = 10;
+    reg1MaxP = 22;
+    reg2MaxP = 43;
+  }else if(pitch < -1.0*reg2MaxP ){
+//    Serial.println("Pitch -3");
+    outputStream[2] = -3;
+    regZeroMaxP = 10;
+    reg1MaxP = 25;
+    reg2MaxP = 37;
+  }
+
+  if(roll < regZeroMaxR && roll > -1.0*regZeroMaxR){
+//    Serial.println("Roll 0");
+    outputStream[1] = 0;
+  }else if(roll > regZeroMaxR && roll < reg1MaxR){
+//    Serial.println("Roll 1");
+    outputStream[1] = 1;
+    regZeroMaxR = 7;
+    reg1MaxR = 28;
+    reg2MaxR = 40;
+  }else if(roll > reg1MaxR && roll < reg2MaxR){
+//    Serial.println("Roll 2");
+    outputStream[1] = 2;
+    regZeroMaxR = 10;
+    reg1MaxR = 22;
+    reg2MaxR = 43;
+  }else if(roll > reg2MaxR){
+//    Serial.println("Roll 3");
+    outputStream[1] = 3;
+    regZeroMaxR = 10;
+    reg1MaxR = 25;
+    reg2MaxR = 37;
+  }else if(roll < -1.0*regZeroMaxR && roll > -1.0*reg1MaxR){
+//    Serial.println("Roll -1");
+    outputStream[1] = -1;
+    regZeroMaxR = 7;
+    reg1MaxR = 28;
+    reg2MaxR = 40;
+  }else if(roll < -1.0*reg1MaxR && roll > -1.0*reg2MaxR){
+//    Serial.println("Roll -2");
+    outputStream[1] = -2;
+    regZeroMaxP = 10;
+    reg1MaxP = 22;
+    reg2MaxP = 43;
+  }else if(roll < -1.0*reg2MaxR){
+//    Serial.println("Roll -3");
+    outputStream[1] = -3;
+    regZeroMaxR = 10;
+    reg1MaxR = 25;
+    reg2MaxR = 37;
+  }
+//  Serial.print(outputStream[0]);
+//  Serial.print(" ");
+//  Serial.print(outputStream[1]);
+//  Serial.print(" ");
+//  Serial.print(outputStream[2]);
+//  Serial.println(" ");
 }
 
 void calibrate(){
@@ -138,10 +289,10 @@ void calibrate(){
     if(z_shake > 5){
       z_shake = 5;
     }
-    Serial.print(" ");
-    Serial.print(z_shake);
-    Serial.print(" ");
-    Serial.println(y_shake);
+//    Serial.print(" ");
+//    Serial.print(z_shake);
+//    Serial.print(" ");
+//    Serial.println(y_shake);
   }
 }
 
