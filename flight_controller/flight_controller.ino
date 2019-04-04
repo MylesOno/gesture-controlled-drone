@@ -427,7 +427,6 @@ void applyMotorSpeed() {
       microsPrevious = microsNow;
   }
 
-    /*
      
     //write pulse length to each esc
     motA.writeMicroseconds(pulse_length_esc1);
@@ -435,6 +434,5 @@ void applyMotorSpeed() {
     motC.writeMicroseconds(pulse_length_esc3);
     motD.writeMicroseconds(pulse_length_esc4);
     
-    */
 }
 
