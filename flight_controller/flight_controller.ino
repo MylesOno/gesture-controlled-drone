@@ -11,8 +11,6 @@
  * @author lobodol <grobodol@gmail.com>
  */
 
-int count = 0;
-
  // ---------------- Motor Control ---------------------------------------
 #include <Servo.h>
 // ---------------------------------------------------------------------------
@@ -47,7 +45,10 @@ unsigned long microsAddThrottle; //for testing take off with no transmitted inst
 float errors[3];                     // Measured errors (compared to instructions) : [Yaw, Pitch, Roll]
 float error_sum[3]      = {0, 0, 0}; // Error sums (used for integral component) : [Yaw, Pitch, Roll]
 float previous_error[3] = {0, 0, 0}; // Last errors (used for derivative component) : [Yaw, Pitch, Roll]
-float adjustmentFrequency;
+float adjustmentPeriod;
+
+// used for putting derivative through low pass filter
+float previous_filtered_delta_err[3] = {0, 0, 0};          // Error deltas in that order   : Yaw, Pitch, Roll
 
 unsigned int pulse_length_esc1 = 1000,
         pulse_length_esc2 = 1000,
@@ -89,6 +90,13 @@ void setup() {
   motB.attach(5, MIN_PULSE_LENGTH, MAX_PULSE_LENGTH);
   motC.attach(6, MIN_PULSE_LENGTH, MAX_PULSE_LENGTH);
   motD.attach(7, MIN_PULSE_LENGTH, MAX_PULSE_LENGTH);
+ /*
+ * (A) (B)     x
+ *   \ /     z ↑
+ *    X       \|
+ *   / \       +----→ y
+ * (C) (D)
+ */
 
   // initial instructions ------------------------------------------------------
   instruction[YAW] = 0;
@@ -96,8 +104,8 @@ void setup() {
   instruction[ROLL] = 0;
   instruction[THROTTLE] = 1000;
 
-  //frequency of flight adjustment
-  adjustmentFrequency = 4000;
+  // period of flight adjustment in microseconds (recalculate fight every 'adjustmentPeriod' microseconds)
+  adjustmentPeriod = 40000;
   
 }
 
@@ -111,10 +119,10 @@ void loop() {
   }
   
   // this is the flight control loop
-  else if( ESC_READY == true){
+  else if(ESC_READY == true){
 
-      // update every 4 milliseconds (max pulse length for esc is 2 milliseconds or 2000 microseconds)
-      if(microsNow - microsPreviousPID >= adjustmentFrequency) {
+      // update every adjustmentPeriod seconds (max pulse length for esc is 2 milliseconds or 2000 microseconds)
+      if(microsNow - microsPreviousPID >= adjustmentPeriod) {
           // get angles
           getAngles();
           //printAngles();
@@ -139,6 +147,7 @@ void loop() {
   
 }//end loop function
 
+//read current angle of drone
 void getAngles(){
   int aix, aiy, aiz;
   int gix, giy, giz;
@@ -165,7 +174,7 @@ void getAngles(){
   heading = filter.getYaw();
   
 }
-
+//helper of getAngles()
 float convertRawAcceleration(int aRaw) {
   // since we are using 2G range
   // -2g maps to a raw value of -32768
@@ -174,7 +183,7 @@ float convertRawAcceleration(int aRaw) {
   float a = (aRaw * 2.0) / 32768.0;
   return a;
 }
-
+//helper of getAngles()
 float convertRawGyro(int gRaw) {
   // since we are using 250 degrees/seconds range
   // -250 maps to a raw value of -32768
@@ -201,6 +210,8 @@ void printAngles() {
   }
 }
 
+//This must be done before motor outputs can be programmed
+//read the directions at the top of this document
 void setupESC() {
 
   data = Serial.read();
@@ -243,6 +254,7 @@ void setupESC() {
 
 /**
  * Test function: send min throttle to max throttle to each ESC.
+ * NOT USED *****
  */
 void test()
 {
@@ -285,13 +297,15 @@ void test()
  * @return void
  */
 void pidController() {
-    float Kp[3]        = {4.0, 1.3, 1.3};    // P coefficients in that order : Yaw, Pitch, Roll
-    float Ki[3]        = {0.02, 0.04, 0.04}; // I coefficients in that order : Yaw, Pitch, Roll
-    float Kd[3]        = {0, 18, 18};        // D coefficients in that order : Yaw, Pitch, Roll
-    float delta_err[3] = {0, 0, 0};          // Error deltas in that order   : Yaw, Pitch, Roll
-    float yaw_pid      = 0;
-    float pitch_pid    = 0;
-    float roll_pid     = 0;
+    float Kp[3]                 = {4.0, 1.3, 1.3};    // P coefficients in that order    : Yaw, Pitch, Roll
+    float Ki[3]                 = {0.02, 0.04, 0.04}; // I coefficients in that order    : Yaw, Pitch, Roll
+    float Kd[3]                 = {0, 18, 18};        // D coefficients in that order    : Yaw, Pitch, Roll
+    float delta_err[3]          = {0, 0, 0};          // Error deltas in that order      : Yaw, Pitch, Roll
+    float filtered_delta_err[3] = {0, 0, 0};          // filtered deltas in that order   : Yaw, Pitch, Roll
+    float yaw_pid               = 0;
+    float pitch_pid             = 0;
+    float roll_pid              = 0;
+    float r                     = .90; //smoothing factor, smaller r for greater smoothing *can be tuned
 
     // Initialize motor commands with throttle
     pulse_length_esc1 = instruction[THROTTLE];
@@ -300,7 +314,7 @@ void pidController() {
     pulse_length_esc4 = instruction[THROTTLE];
 
     // Do not calculate anything if throttle is 0
-    if (instruction[THROTTLE] >= 1012) {
+    if (instruction[THROTTLE] >= 1040) {
         // Calculate sum of errors : Integral coefficients
         error_sum[YAW]   += errors[YAW];
         error_sum[PITCH] += errors[PITCH];
@@ -310,21 +324,25 @@ void pidController() {
         delta_err[YAW]   = errors[YAW]   - previous_error[YAW];
         delta_err[PITCH] = errors[PITCH] - previous_error[PITCH];
         delta_err[ROLL]  = errors[ROLL]  - previous_error[ROLL];
-
+        
+        // apply low pass filter on derivative of proportional error for pitch and roll (reduce noise)
+        filtered_delta_err[PITCH] = (1-r)*previous_filtered_delta_err[PITCH] + r*delta_err[PITCH];
+        filtered_delta_err[ROLL]  = (1-r)*previous_filtered_delta_err[ROLL]  + r*delta_err[ROLL];
+        
         // Save current error as previous_error for next time
         previous_error[YAW]   = errors[YAW];
         previous_error[PITCH] = errors[PITCH];
         previous_error[ROLL]  = errors[ROLL];
+        previous_filtered_delta_err[PITCH] = filtered_delta_err[PITCH];
+        previous_filtered_delta_err[ROLL]  = filtered_delta_err[ROLL];
         
         // PID = e.Kp + ∫e.Ki + Δe.Kd
         yaw_pid   = (errors[YAW]   * Kp[YAW])   + (error_sum[YAW]   * Ki[YAW])   + (delta_err[YAW]   * Kd[YAW]);
-        pitch_pid = (errors[PITCH] * Kp[PITCH]) + (error_sum[PITCH] * Ki[PITCH]) + (delta_err[PITCH] * Kd[PITCH]);
-        roll_pid  = (errors[ROLL]  * Kp[ROLL])  + (error_sum[ROLL]  * Ki[ROLL])  + (delta_err[ROLL]  * Kd[ROLL]);
+        pitch_pid = (errors[PITCH] * Kp[PITCH]) + (error_sum[PITCH] * Ki[PITCH]) + (filtered_delta_err[PITCH] * Kd[PITCH]);
+        roll_pid  = (errors[ROLL]  * Kp[ROLL])  + (error_sum[ROLL]  * Ki[ROLL])  + (filtered_delta_err[ROLL]  * Kd[ROLL]);
 
         // cancel out yaw
         yaw_pid = 0;
-
-        // clamping integral component
         
         // Calculate pulse duration for each ESC
         pulse_length_esc1 = instruction[THROTTLE] + roll_pid + pitch_pid - yaw_pid;
@@ -333,7 +351,7 @@ void pidController() {
         pulse_length_esc4 = instruction[THROTTLE] - roll_pid - pitch_pid - yaw_pid;
     }
 
-    //clamp integral component (1600 is arbitrary, should experiment if there are problems)
+    //clamp integral component to defend against error buildup (1600 is arbitrary, should experiment if there are problems)
     //-------------------------------------------------------------------------------------
     //pitch
     if( (pulse_length_esc1 >= 1600 || pulse_length_esc2 >= 1600 || pulse_length_esc3 >= 1600 || pulse_length_esc4 >= 1600)
@@ -370,6 +388,7 @@ float minMax(float value, float min_value, float max_value) {
     return value;
 }
 
+//read the current flight instruction into the system
 void getFlightInstruction() {
 
       //initialized for takeoff
@@ -377,8 +396,8 @@ void getFlightInstruction() {
       instruction[PITCH] = 0; //negative forward, positive backward
       instruction[ROLL] = 0; //negative left, positive right
 
-      unsigned int increaseFrequency = 400000; // every 400 milliseconds
-      if ((microsNow - microsAddThrottle) >= increaseFrequency && instruction[THROTTLE] < 1700) {
+      unsigned int increasePeriod = 400000; // every 400 milliseconds
+      if ((microsNow - microsAddThrottle) >= increasePeriod && instruction[THROTTLE] < 1700) {
           instruction[THROTTLE] = instruction[THROTTLE] + 5;
           microsAddThrottle = microsNow;
       }
@@ -396,39 +415,42 @@ void calculateErrors() {
     errors[ROLL]  = instruction[ROLL]  - roll;
 }
 
+// write pulselength calculated by PID to ESC's
 void applyMotorSpeed() {
 
     //print rate in micro seconds
-  unsigned long printRate = 2000000;
+    unsigned long printRate = 2000000;
+    // print the esc outputs to monitor
+    if (microsNow - microsPrevious >= printRate) {
+        Serial.print("motA: ");
+        Serial.print(pulse_length_esc1);
+        Serial.print("  motB: ");
+        Serial.print(pulse_length_esc2);
+        Serial.print("  motC: ");
+        Serial.print(pulse_length_esc3);
+        Serial.print("  motD: ");
+        Serial.print(pulse_length_esc4);
+        Serial.print("  Throttle: ");
+        Serial.println(instruction[THROTTLE]);
+      
+        /*  
+        //error info for PID
+        Serial.print("Pitch Error: ");
+        Serial.print(errors[PITCH]);
+        Serial.print(" Roll Error: ");
+        Serial.println(errors[ROLL]);
   
-  if (microsNow - microsPrevious >= printRate) {
-      Serial.print("motA: ");
-      Serial.print(pulse_length_esc1);
-      Serial.print("  motB: ");
-      Serial.print(pulse_length_esc2);
-      Serial.print("  motC: ");
-      Serial.print(pulse_length_esc3);
-      Serial.print("  motD: ");
-      Serial.print(pulse_length_esc4);
-      Serial.print("  Throttle: ");
-      Serial.println(instruction[THROTTLE]);
-    
-      /*  
-      Serial.print("Pitch Error: ");
-      Serial.print(errors[PITCH]);
-      Serial.print(" Roll Error: ");
-      Serial.println(errors[ROLL]);
-
-      Serial.print("Pitch Error Sum: ");
-      Serial.print(error_sum[PITCH]);
-      Serial.print(" Roll Error Sum: ");
-      Serial.println(error_sum[ROLL]);
-      */
-      microsPrevious = microsNow;
-  }
+        Serial.print("Pitch Error Sum: ");
+        Serial.print(error_sum[PITCH]);
+        Serial.print(" Roll Error Sum: ");
+        Serial.println(error_sum[ROLL]);
+        */
+        
+        microsPrevious = microsNow;
+    }
 
      
-    //write pulse length to each esc
+    //write pulse length to each esc (apply speed)
     motA.writeMicroseconds(pulse_length_esc1);
     motB.writeMicroseconds(pulse_length_esc2);
     motC.writeMicroseconds(pulse_length_esc3);
